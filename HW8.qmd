@@ -1,0 +1,434 @@
+---
+title: "HW8"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Bike Sharing Rentals Modeling
+
+### Reading in the Data
+
+The first step will be to read in the data and to do so we will download the data directly from a website and then read it in using functions from the tidyverse.
+
+```{r}
+# Loading librarys
+library(tidyverse)
+library(lubridate)
+library(purrr)
+library(ggcorrplot)
+library(tidymodels)
+```
+
+```{r}
+# Loading in the data
+bike_data <- read_csv("https://www4.stat.ncsu.edu/~online/datasets/SeoulBikeData.csv", locale = locale(encoding = "latin1"))
+
+# Storing orginial names for reference
+attr(bike_data, "orginal_names") <- names(bike_data)
+
+# Renaming variables for simplicity
+bike_data <- bike_data |>
+  rename(date = Date, bike_count = `Rented Bike Count`, temp_c = `Temperature(°C)`, humidity = `Humidity(%)`, wind_speed = `Wind speed (m/s)`,
+         visibility = `Visibility (10m)`, dew_point =`Dew point temperature(°C)`, solar_rads = `Solar Radiation (MJ/m2)`, 
+         rain = `Rainfall(mm)`, snow = `Snowfall (cm)`, season = Seasons, holiday = Holiday, functioning = `Functioning Day`)
+```
+### EDA
+
+Now the next step is to check if there are any missing values and to make sure that all the columns are listed in a logical manner (aka numeric is numeric). We will also be changing the character variables into factors to make anlyasis easier, and making the date column into the date format.
+
+```{r}
+# Function to check for NA's
+sum_na <- function(col){
+sum(is.na(col))
+}
+bike_data |>
+summarize(across(everything(), sum_na))
+
+# Converting date column to date format
+bike_data <- bike_data |>
+  mutate(date = dmy(date))
+
+# Getting list of unique rows for character variables in order to make them factors
+season_uniq <-unique(bike_data$season)
+holiday_uniq <- unique(bike_data$holiday)
+functioning_uniq <- unique(bike_data$functioning)
+
+# Creating factors for character vars
+bike_data <- mutate(bike_data, across(c(season, holiday, functioning), as.factor))
+```
+
+Now that we have completed those steps, we need to run some summary statistics in order to get a better idea of how the variables relate to one another. Of special importance is how the variables relate to the bike rental count. 
+
+
+```{r}
+# Creating function to grab numeric summary stats
+numeric_summary <- function(data){
+  # Selecting numeric vars
+  num_vars <- data |>
+    select(where(is.numeric))
+  # Creating empty list
+  num_sum_list <- list()
+  
+  # Looping summary stats
+  for(num_var in colnames(num_vars)){
+  num_sums <- num_vars |>
+  summarize(across(num_var, .fns = list("mean" = mean, # This will create a named list with .fns
+                                       "median" = median,
+                                       "var" = var,
+                                       "sd" = sd,
+                                       "IQR" = IQR), .names = "{.fn}")) # .fn is function names
+  num_sums <- num_sums |>
+    mutate(variable = num_var)
+  num_sums <- num_sums |> 
+    select(variable, everything())
+  
+  num_sum_list[[num_var]] <- num_sums
+  }
+  return(num_sum_list)
+}
+
+# Running function
+num_sums <- numeric_summary(bike_data)
+num_sums
+
+# Creating combined summary
+num_sums_tibble <- bind_rows(num_sums)
+# Setting Scipen so it displays without scientifc notation
+options(scipen = 999)
+# Printing table
+num_sums_tibble
+```
+
+Now that we have created summary stats for our numeric variables we can no go ahead and look at some summary stats for our categorical variables, and to do so we shall create tables of counts for each variable. 
+
+```{r}
+# 1 way tables
+season1way <- table("season" = bike_data$season)
+season1way
+
+holiday1way <- table("holiday" = bike_data$holiday)
+holiday1way
+
+functioning1way <- table("functioning" = bike_data$functioning)
+functioning1way
+
+# 2 way tables
+season_holiday <- table(bike_data$season, bike_data$holiday)
+season_holiday
+
+season_functioning <- table(bike_data$season, bike_data$functioning)
+season_functioning
+
+holiday_functioning <- table(bike_data$holiday, bike_data$functioning)
+holiday_functioning
+```
+
+Now I want to run summary stats specifically looking at bike rental counts, as I had disccused previously. Specifically, I want to see what factors are correlated with bike rental counts. To start I am going to see if there are any bike rentals when the bikes are not functioning as I assume there will be none.
+
+```{r}
+# Subsetting the data for when bikes do not function
+no_function_data <- bike_data |>
+  group_by(functioning) |>
+  filter(functioning == "No")
+
+# Getting the mean for the bike counts for this data
+no_function_data |>
+  mean(bike_count)
+```
+
+With this we find that there is are no bike rentals when the bikes are not functioning, which confirms my suscipsion. Next we are going to look at correlations between the numeric variables by making a correlation plot.
+
+```{r}
+# subsetting data for plot
+bike_data |>
+select(-date, -season, - holiday, -functioning) |>
+cor() |>
+ggcorrplot(hc.order = TRUE, type = "full", lab = TRUE)
+```
+
+From these results we can see that temperature, dewpoint, and hour have moderate correlations with bike rental count. There are also weak positive correlations between wind speed and solar rads and bike rental counts. Humidity, rain, and snow all have weak negative correlations with bike rental counts.
+
+Now the next step is going to be to group the date by the date, seasons and holiday variables. After grouping the data we are going to find the sum of bike count, rain fall, and snow fall, then the means of all the weather releated variables. 
+
+```{r}
+# Subsetting the data 
+bike_sub <- bike_data |>
+  group_by(date, season, holiday) |>
+  summarize(bike_count = sum(bike_count),
+            rain = sum(rain),
+            snow = sum(snow),
+            temp_c = mean(temp_c),
+            humidity = mean(humidity),
+            wind_speed = mean(wind_speed),
+            visibility = mean(visibility),
+            dew_point = mean(dew_point),
+            solar_rads = mean(solar_rads))
+  
+  
+```
+
+Since our data is in a more useable format for our purposes we will rerun all of the summary statistics we ran before, and also create some plots as well.
+
+```{r}
+# Reworking numeric summary function
+num_sum_function <- function(data, num_var = "bike_count"){
+    data1 <- data |> 
+      group_by(date) |>
+    summarize(across(num_var, .fns = list("mean" = mean, # This will create a named list with .fns
+                                       "median" = median,
+                                       "var" = var,
+                                       "sd" = sd,
+                                       "IQR" = IQR), .names = "{.fn}")) # .fn is function names
+  return(data1)
+}
+
+# Running function through numeric variables
+bike_sub_sum <- num_sum_function(bike_sub)
+rain_sub_sum <- num_sum_function(bike_sub, num_var = "rain")
+snow_sub_sum <- num_sum_function(bike_sub, num_var = "snow")
+temp_sub_sum <- num_sum_function(bike_sub, num_var = "temp_c")
+humidity_sub_sum <- num_sum_function(bike_sub, num_var = "humidity")
+wind_sub_sum <- num_sum_function(bike_sub, num_var = "wind_speed")
+visibility_sub_sum <- num_sum_function(bike_sub, "visibility")
+dew_sub_sum <- num_sum_function(bike_sub, num_var = "dew_point")
+solar_sub_sum <- num_sum_function(bike_sub, num_var = "solar_rads")
+
+# Creating large tibble
+num_sub_tibble <- bind_rows(bike_sub_sum, rain_sub_sum, snow_sub_sum, temp_sub_sum,
+                            humidity_sub_sum, wind_sub_sum, visibility_sub_sum,
+                            dew_sub_sum, solar_sub_sum)
+num_sub_tibble
+
+
+```
+
+After running this code I realized that it was not really going to tell me anything, but it was a learning lesson. Instead I am going to now see how my tables turn out with the grouped data.
+
+```{r}
+# 1 way tables
+season1way2 <- table("season" = bike_sub$season)
+season1way2
+
+holiday1way2 <- table("holiday" = bike_sub$holiday)
+holiday1way2
+
+# 2 way tables
+season_holiday2 <- table("season" = bike_sub$season, "holiday" = bike_sub$holiday)
+season_holiday2
+
+```
+
+Now I have figured out how to get summary statistics by using the summary() function, and will also be figuring out the correlations.
+
+```{r}
+# Creating summary stats
+bike_sub_summary <- summary(bike_sub)
+
+# Creating numerical correlations
+corr_bike_data <- bike_sub |>
+  ungroup() |>
+  select(where(is.numeric))
+
+corr_bike_data |>
+cor() |>
+ggcorrplot(hc.order = TRUE, type = "full", lab = TRUE)
+```
+
+Creating scatter plot of bike count by the highest correlated numeric variables to get a better understanding of the how the data is spread. We are going to look at scatterplots of temperature, dew point, solar radation, and snow fall. 
+
+```{r}
+# Temperature scatter plot
+ggplot(bike_sub, aes(x=temp_c, y=bike_count)) +
+  geom_jitter(alpha=0.6) +
+  ggtitle("Temperature by Bike Rental Count") +
+  xlab("Temperature (C)") +
+  ylab("Bike Count")
+
+# dew point scatter plot
+ggplot(bike_sub, aes(x=dew_point, y=bike_count)) +
+  geom_jitter(alpha=0.6) +
+  ggtitle("Dew Point by Bike Rental Count") +
+  xlab("Dew Point (C)") +
+  ylab("Bike Count")
+
+# Solar Radation scatter plot
+ggplot(bike_sub, aes(x=solar_rads, y=bike_count)) +
+  geom_jitter(alpha=0.6) +
+  ggtitle("Solar Radiation by Bike Rental Count") +
+  xlab("Temperature (MJ/m2)") +
+  ylab("Bike Count")
+
+# Snow fall scatter plot
+ggplot(bike_sub, aes(x=snow, y=bike_count)) +
+  geom_jitter(alpha=0.6) +
+  ggtitle("Snow Fall by Bike Rental Count") +
+  xlab("Snow Fall (cm)") +
+  ylab("Bike Count")
+```
+
+Nothing really special can be inferred from the first three plots, as they data follows what you would expect with a fairly linear distribution. The interesting plot is the snow fall one as it shows that when snow fall does occur the amount of bike rentals is drastically reduced, but this happens relatively rarely. To investigate this further we are going to remove instance where snow fall equals zero to get a better idea of how the correlation works by plotting the data
+
+```{r}
+# Subsetting data
+snow_zero_data <- bike_sub |>
+  filter(snow > 0)
+
+# Correlation when removing zero
+cor(x = snow_zero_data$snow, y = snow_zero_data$bike_count)
+ 
+# plot when moving zero
+# Snow fall scatter plot
+ggplot(snow_zero_data, aes(x=snow, y=bike_count)) +
+  geom_jitter(alpha=0.6) +
+  ggtitle("Snow Fall by Bike Rental Count") +
+  xlab("Snow Fall (cm)") +
+  ylab("Bike Count")
+
+```
+
+### Spliting the Data
+
+Now we need to split the data up to make a training and a test set with a 75/25 split. To do so we shall use the strata argument to split the data by seasons, and we will also create a 10 fold CV split on the training data.
+
+```{r}
+# Splitting the data using initial_split
+set.seed(222) 
+bike_split <- initial_split(bike_sub, prop = .75)
+bike_train <- training(bike_split)
+bike_test <- testing(bike_split)
+
+# Creating 10 fold CV split
+bike_cv <- vfold_cv(data = bike_train, v = 10)
+```
+
+### Fitting MLR Models 
+
+Now that the data is how we need it to be we can move on to making some MLR models. For the first recipe we will be ignoring the date variable, and instead use it to create a weekday/weekend factor variable, after that we will standardize the numeric variables, and then create dummy variables for the seasons, holiday, and our new day variable.
+
+```{r}
+# Creating first recipe object
+recipe1 <- recipe(bike_count ~ ., data = bike_train) |>
+  step_date(date, features = "dow") |>
+  step_mutate(weekend_weekday = factor(
+    if_else(date_dow %in% c("Sun", "Sat"), "Weekend", "Weekday"))) |>
+  step_rm(date, date_dow) |>
+  step_normalize(all_numeric()) |>
+  step_dummy(season, holiday, weekend_weekday)
+  
+# Test recipe to make sure it is working properly 
+test_recipe <- prep(recipe1)
+trans_data <- bake(test_recipe, new_data = NULL)
+trans_data
+```
+
+Now that we have made our first recipe we will now need to make our second recipe. In this recipe we will repeat the steps above, but will also add in interaction between seasons and holiday, seasons and temperature, temperature and rainfall.
+
+```{r}
+# Creating second recipe
+recipe2 <- recipe(bike_count ~ ., data = bike_train) |>
+  step_date(date, features = "dow") |>
+  step_mutate(weekend_weekday = factor(
+    if_else(date_dow %in% c("Sun", "Sat"), "Weekend", "Weekday"))) |>
+  step_rm(date, date_dow) |>
+  step_normalize(all_numeric()) |>
+  step_dummy(season, holiday, weekend_weekday) |>
+  step_interact(~ starts_with("season"):holiday_No.Holiday) |>
+  step_interact(~ starts_with("season"):temp_c) |>
+  step_interact(~ temp_c:rain)
+
+# Test recipe to make sure it is working
+test_recipe2 <- prep(recipe2)
+trans_data2 <- bake(test_recipe2, new_data = NULL)
+trans_data2
+```
+
+Now we are needing to repeat the whole process over, but this time we are going to add quadratic terms for each numeric predictor.
+
+```{r}
+# Creating recipe 3
+recipe3 <- recipe(bike_count ~ ., data = bike_train) |>
+  step_date(date, features = "dow") |>
+  step_mutate(weekend_weekday = factor(
+    if_else(date_dow %in% c("Sun", "Sat"), "Weekend", "Weekday"))) |>
+  step_rm(date, date_dow) |>
+  step_normalize(all_numeric()) |>
+  step_dummy(season, holiday, weekend_weekday) |>
+  step_interact(~ starts_with("season"):holiday_No.Holiday) |>
+  step_interact(~ starts_with("season"):temp_c) |>
+  step_interact(~ temp_c:rain) |>
+  step_poly(rain,
+            snow,
+            temp_c,
+            humidity,
+            wind_speed,
+            visibility,
+            dew_point,
+            solar_rads,
+            degree = 2, keep_original_cols = FALSE)
+
+# Test recipe to make sure it is working
+test_recipe3 <- prep(recipe3)
+trans_data3 <- bake(test_recipe3, new_data = NULL)
+trans_data3
+```
+
+Now that we have created our recipes we need to set up our linear model for usage with the lm engine. This will consist of fitting the models using our 10 CV via the fit_resamples() function and to use that to choose a best model. After selecting our best fit model we will fit the model to the entire training data set using the last_fit() function. This best fit model will then be used to compute the RMSE metric on the test set and to obtain the final model coefficent table on the training set using extract_fit_parsnip() and tidy()
+
+```{r}
+# specifying the model 
+bike_model <- linear_reg() %>%
+  set_engine("lm") 
+  
+
+# Creating a work flow for the models 
+recipe1flow <- workflow() |>
+  add_recipe(recipe1) |>
+  add_model(bike_model)
+ 
+
+recipe2flow <- workflow() |>
+  add_recipe(recipe2) |>
+  add_model(bike_model) 
+  
+
+recipe3flow <- workflow() |>
+  add_recipe(recipe3) |>
+  add_model(bike_model) 
+
+# Fitting the models
+recipe1fit <- recipe1flow |>
+  fit_resamples(bike_cv) 
+  
+  
+recipe2fit <- recipe2flow |>
+  fit_resamples(bike_cv) 
+
+recipe3fit <- recipe3flow |>
+  fit_resamples(bike_cv) 
+
+# binding them together while finding best model
+rbind(recipe1fit |> collect_metrics(),
+      recipe2fit |> collect_metrics(),
+      recipe3fit |> collect_metrics())
+  
+
+```
+
+Looking at the table we created we can see that both recipe1 and recipe2 have almost identical RMSEs and RSQs meaning that we should choose the simpler model that being recipe 1. Since we have selected our model we are going to use last_fit() to apply our model to the test data.
+
+```{r}
+# creating new fit object
+best_fit <- last_fit(bike_model, recipe1, split = bike_split)
+
+final_results <- best_fit |>
+  collect_metrics()
+final_results
+# creating final model
+final_model <- extract_fit_parsnip(best_fit)
+final_model
+```
+
+The RMSE is .698 and the RSQ is .617 for recipe1, and displayed is the final model.
+
